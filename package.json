@@ -1,0 +1,13 @@
+{
+  "name": "transitbox",
+  "version": "0.2.0",
+  "private": true,
+  "scripts": {
+    "test:ui": "node tools/check_ui.cjs",
+    "test:public": "node tools/check_ui.cjs public",
+    "check:site": "python tools/check_publication.py public"
+  },
+  "devDependencies": {
+    "jsdom": "16.7.0"
+  }
+}

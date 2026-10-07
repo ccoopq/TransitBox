@@ -1,0 +1,20 @@
+{
+  "repository": "https://github.com/damo-cv/TransReID",
+  "license": "MIT",
+  "sources": {
+    "vit_pytorch.py": {
+      "url": "https://raw.githubusercontent.com/damo-cv/TransReID/main/model/backbones/vit_pytorch.py",
+      "sha256": "36ea2f99d280c21ae2c1c2c492bba70424c07e7ee63b653ee79e94b2ee799025"
+    },
+    "make_model.py": {
+      "url": "https://raw.githubusercontent.com/damo-cv/TransReID/main/model/make_model.py",
+      "sha256": "f9e229c97b6b999971706f534aa3502846e46cb4eadca3bbfc000361065560c7"
+    }
+  },
+  "changes": [
+    "torch._six.container_abcs replaced with collections.abc for PyTorch 2.x",
+    "Only the original JPM evaluation class and initialization helpers are imported; training-only imports omitted"
+  ],
+  "checkpoint_url": "https://drive.google.com/file/d/11p4RjmpCGGAS-876VEt7OoFrUeHTUlyO/view",
+  "checkpoint_label": "Official TransReID ViT Market1501 trained checkpoint"
+}

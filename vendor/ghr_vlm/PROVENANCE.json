@@ -1,0 +1,18 @@
+{
+  "source": "../GHR-VLM",
+  "files": {
+    "stream.py": {
+      "sha256": "19f141de7034c774f1fe168b76742150ad806ef4cf5f06e2fc90aa6674039af2"
+    },
+    "sam3_door_detector.py": {
+      "sha256": "3ac33cec7be7c3552475e8c8a10d0e947319bb56239e897adcc95bbd6295c32e"
+    },
+    "gpt_payment_classifier.py": {
+      "sha256": "7a67022cf00722740011571583045c3b5739e52e0c39bc7704f96804a2bbafb4"
+    }
+  },
+  "changes": [
+    "Removed embedded API credentials",
+    "Added a clip-ready callback after the original tracking and segmentation"
+  ]
+}

@@ -1,0 +1,6 @@
+torch>=2.5
+torchvision>=0.20
+numpy
+opencv-python
+Pillow
+gdown>=5.2,<6

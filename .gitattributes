@@ -1,0 +1,8 @@
+*.py text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.m3u8 text eol=lf
+*.mp4 binary
+*.m4s binary
+*.jpg binary
