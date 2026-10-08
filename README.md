@@ -16,4 +16,4 @@ python3 serve.py --directory . --host 0.0.0.0 --port 8787
 
 Open [http://localhost:8787](http://localhost:8787).
 
-Videos and passenger data are available on the website and are not included in this repository.
+Videos and passenger data are available on the website, with faces blurred, and are not included in this repository.

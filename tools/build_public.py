@@ -48,7 +48,9 @@ def build(output=None, private_assets=None):
         assets = Path(private_assets).resolve()
         from tools.build_site import read_tag, write_tag
         from tools.check_publication import check
+        from tools.check_redaction import check as check_redaction
         # Verify existing video/result assets without running inference or encoding.
+        check_redaction(assets)
         check(assets)
         snapshot = (assets/'index.html').read_text()
         for name in ('transitbox-data', 'transitbox-reid-meta'):
@@ -61,6 +63,8 @@ def build(output=None, private_assets=None):
                             'Source videos, passenger clips and saved results are synchronized to video time.')
         html = html.replace('Videos and passenger records are not included in the public site.',
                             'Detection, identity and payment results were computed before publication.')
+        html = html.replace('One passenger track list shared by ReID and payment detection.',
+                            'One passenger track list shared by ReID and payment detection. Faces are blurred.')
         library = '<script src="https://cdn.jsdelivr.net/npm/hls.js@1.6.13/dist/hls.min.js" crossorigin="anonymous"></script>\n'
         if library not in html:
             html = html.replace('<script>\n', library + '<script>\n', 1)
@@ -74,6 +78,7 @@ def build(output=None, private_assets=None):
     (output/'index.html').write_text(html)
     (output/'.nojekyll').write_text('')
     if private_assets is not None:
+        check_redaction(output)
         report = check(output)
         (output/'publication.json').write_text(json.dumps(report, indent=2)+'\n')
         print(f"Built website: {report['clips']} clips, {report['size_mib']} MiB; assets remain outside source Git history")

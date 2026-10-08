@@ -1,4 +1,4 @@
-"""Publish TransitBox code and a data-free GitHub Pages frontend.
+"""Publish TransitBox code and Pages with verified blurred assets fetched privately.
 
 The source tree's .git is never touched. Publication uses an isolated checkout.
 Credentials come from an authenticated gh CLI, environment or a hidden prompt;
@@ -28,6 +28,7 @@ def stage(repository):
     directories=['transitbox','tools','tests','vendor/transreid','vendor/ghr_vlm','.github']
     files=['README.md','requirements-reid.txt','launch.sh','serve.py','index.html','.gitignore','.gitattributes']
     if (ROOT/'package.json').is_file():files.append('package.json')
+    if (ROOT/'requirements-privacy.txt').is_file():files.append('requirements-privacy.txt')
     ignore=shutil.ignore_patterns('__pycache__','*.pyc','progress.txt','encoding.json','.build-cache.json')
     for directory in directories:
         destination=checkout/directory

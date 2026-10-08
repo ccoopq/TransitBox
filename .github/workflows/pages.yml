@@ -46,6 +46,8 @@ jobs:
         run: python tools/build_public.py --private-assets .publish/private-assets/public
       - name: Verify website bundle
         run: python tools/check_publication.py .publish/public-site
+      - name: Verify face-redacted media
+        run: python tools/check_redaction.py .publish/public-site
       - name: Configure Pages
         uses: actions/configure-pages@v5
       - name: Upload website
