@@ -6,5 +6,5 @@ MODEL_URL = f'https://media.githubusercontent.com/media/opencv/opencv_zoo/{MODEL
 VERSION = 'yunet-face-only-temporal-v2'
 FACE_PADDING = .15
 HOLD_SECONDS = .5
-MIN_SCORE = .35
+MIN_SCORE = .28
 LARGE_BOX_SCORE = .70

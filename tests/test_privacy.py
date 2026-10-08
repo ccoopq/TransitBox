@@ -42,6 +42,7 @@ class PrivacyTests(unittest.TestCase):
     def test_large_weak_equipment_detection_is_rejected(self):
         self.assertFalse(valid_face_box((170,157,108,145),.42,640,360))
         self.assertTrue(valid_face_box((280,122,34,42),.81,640,360))
+        self.assertTrue(valid_face_box((412,116,32,43),.32,640,360))
         self.assertTrue(valid_face_box((10,10,70,100),.6,100,160,scene_guard=False))
 
     def test_face_mask_is_local_and_does_not_cover_torso(self):
