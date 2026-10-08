@@ -1,14 +1,11 @@
 """Create a face-blurred website bundle without changing private originals."""
 from pathlib import Path
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from fractions import Fraction
 import argparse
-import bisect
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -20,11 +17,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from transitbox.privacy import FaceDetector, VERSION, MODEL_SHA256, MODEL_URL, head_box, redact, TemporalFaces, uncovered_heads
+from transitbox.privacy import FaceDetector, VERSION, MODEL_SHA256, MODEL_URL, redact, TemporalFaces
+from transitbox.privacy_constants import FACE_PADDING, HOLD_SECONDS, MIN_SCORE, LARGE_BOX_SCORE
 from tools.build_site import read_tag, write_tag
 from tools.check_publication import check
 
-PREFIX = 'redacted/faces-v1'
+PREFIX = 'redacted/faces-v2'
 MEDIA_SUFFIXES = {'.mp4','.m4s','.m3u8','.jpg','.jpeg','.png','.webp'}
 LOCAL = threading.local()
 
@@ -52,20 +50,6 @@ def probe(path):
             'start_time':float(data['format'].get('start_time',0))}
 
 
-class Tracks:
-    def __init__(self, data):
-        self.frames = data['tracking']
-        self.times = [f[0] for f in self.frames]
-
-    def near(self, timestamp, width, height):
-        start,end = bisect.bisect_left(self.times,timestamp-.45),bisect.bisect_right(self.times,timestamp+.45)
-        return [head_box(obj[1:5],width,height) for frame in self.frames[start:end] for obj in frame[2]]
-
-    def during(self, start, end, width, height):
-        a,b = bisect.bisect_left(self.times,start-.45),bisect.bisect_right(self.times,end+.45)
-        return [head_box(obj[1:5],width,height) for frame in self.frames[a:b] for obj in frame[2]]
-
-
 def detector(model, device):
     if not hasattr(LOCAL,'detector'):
         LOCAL.detector = FaceDetector(model, device=device)
@@ -80,7 +64,6 @@ def process_video(source, destination, context, offset, model, device, audit_dir
     fps = float(Fraction(info['rate']))
     frame_bytes = width*height*3
     d = detector(model,device)
-    tracks = Tracks(context)
     decode = ['/usr/bin/ffmpeg','-nostdin','-v','error','-threads','1','-i',str(source),
               '-an','-f','rawvideo','-pix_fmt','bgr24','pipe:1']
     encode = ['/usr/bin/ffmpeg','-nostdin','-v','error','-y','-f','rawvideo','-pix_fmt','bgr24',
@@ -116,8 +99,7 @@ def process_video(source, destination, context, offset, model, device, audit_dir
                 for image,faces in zip(batch,predictions):
                     timestamp = offset+count/fps
                     held = history.update(timestamp,faces)
-                    heads = tracks.near(timestamp,width,height)
-                    output,pixels = redact(image,held,uncovered_heads(held,heads))
+                    output,pixels = redact(image,held)
                     writer.stdin.write(output.tobytes())
                     detected += len(faces)
                     masked_pixels += pixels
@@ -182,12 +164,13 @@ def run(source,output,model,device='cuda',workers=2):
     html = (source/'index.html').read_text()
     datasets = read_tag(html,'transitbox-data')
     context_hash = hashlib.sha256(json.dumps(datasets,sort_keys=True).encode()).hexdigest()
+    implementation_hash=hashlib.sha256((ROOT/'transitbox/privacy.py').read_bytes()+(ROOT/'transitbox/privacy_constants.py').read_bytes()+Path(__file__).read_bytes()).hexdigest()
     results = {'sources':{},'clips':{},'images':{}}
     started = time.monotonic()
 
     def cached(key,signature,job):
         file = state/(hashlib.sha256(key.encode()).hexdigest()+'.json')
-        signature = {**signature,'version':VERSION,'model_sha256':MODEL_SHA256,'context_hash':context_hash}
+        signature = {**signature,'version':VERSION,'model_sha256':MODEL_SHA256,'context_hash':context_hash,'implementation_sha256':implementation_hash}
         if file.exists():
             saved=json.loads(file.read_text())
             if saved['signature']==signature:
@@ -225,11 +208,6 @@ def run(source,output,model,device='cuda',workers=2):
             if len(results['clips'])%25==0:
                 print(f'Passenger clips: {len(results["clips"])}/{len(clips)}',flush=True)
 
-    image_context={}
-    for name,data,clip in clips:
-        for key in ('thumbnail','reidThumbnail','sheet'):
-            if clip.get(key):image_context[clip[key]]=(data,clip)
-    for name,data in datasets.items():image_context[data['poster']]=(data,None)
     images=[p for p in source.rglob('*') if p.is_file() and p.suffix.lower() in {'.jpg','.jpeg','.png','.webp'}]
 
     def image_job(path):
@@ -238,25 +216,24 @@ def run(source,output,model,device='cuda',workers=2):
         def process():
             image=cv2.imread(str(path));d=detector(model,device)
             if image is None:raise ValueError(f'Cannot read image: {path}')
-            height,width=image.shape[:2];faces=[];heads=[]
-            data,clip=image_context.get(relative,(None,None))
+            height,width=image.shape[:2];faces=[]
             if '_sheets/' in relative:
                 for row in range(2):
                     for col in range(4):
                         x1,x2=col*width//4,(col+1)*width//4
                         y1,y2=row*height//2,(row+1)*height//2
                         for x,y,w,h in d.detect(image[y1:y2,x1:x2]):faces.append((x+x1,y+y1,w,h))
-                        if data is not None and clip is not None:
-                            for a,b,c,e in Tracks(data).during(clip['start'],clip['end'],x2-x1,y2-y1):
-                                heads.append((a+x1,b+y1,c+x1,e+y1))
             else:
-                faces=d.detect(image)
-                if relative.startswith('assets/people/'):
-                    heads=[(0,0,width,round(height*.55))]
-                elif data is not None:
-                    lookup=Tracks(data)
-                    heads=lookup.during(clip['start'],clip['end'],width,height) if clip else lookup.near(data['initial'],width,height)
-            blurred,pixels=redact(image,faces,uncovered_heads(faces,heads) if not relative.startswith('assets/people/') else heads)
+                portrait=relative.startswith('assets/people/')
+                faces=d.detect(image,scene_guard=not portrait)
+                if portrait:
+                    # A native-scale pass also catches large close-up faces in crops.
+                    native=d.detect(image,max_scale=1.,scene_guard=False)
+                    faces.extend(box for box in native if not any(
+                        abs(box[0]+box[2]/2-old[0]-old[2]/2)<min(box[2],old[2])*.4 and
+                        abs(box[1]+box[3]/2-old[1]-old[3]/2)<min(box[3],old[3])*.4
+                        for old in faces))
+            blurred,pixels=redact(image,faces)
             target.parent.mkdir(parents=True,exist_ok=True)
             if not cv2.imwrite(str(target),blurred,[cv2.IMWRITE_JPEG_QUALITY,85]):
                 raise ValueError(f'Cannot write image: {target}')
@@ -279,7 +256,9 @@ def run(source,output,model,device='cuda',workers=2):
     hashes={str(path.relative_to(output)):digest(path) for path in output.rglob('*') if path.is_file() and path.suffix.lower() in MEDIA_SUFFIXES}
     privacy={'status':'complete','version':VERSION,'detector':'OpenCV YuNet','model_url':MODEL_URL,
              'model_sha256':MODEL_SHA256,'device':device,'per_frame_detection':True,
-             'temporal_hold_seconds':1.,'face_padding':.40,'asset_prefix':PREFIX,
+             'temporal_hold_seconds':HOLD_SECONDS,'face_padding':FACE_PADDING,'asset_prefix':PREFIX,
+             'body_fallback':False,'portrait_blanket_mask':False,'minimum_face_score':MIN_SCORE,
+             'large_box_score':LARGE_BOX_SCORE,'implementation_sha256':implementation_hash,
              'sources':results['sources'],'clips_processed':len(results['clips']),
              'clip_frames':sum(item['frames'] for item in results['clips'].values()),
              'clip_detection_frames':sum(item['detection_frames'] for item in results['clips'].values()),

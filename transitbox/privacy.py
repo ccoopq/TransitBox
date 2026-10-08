@@ -1,4 +1,4 @@
-"""Face redaction using YuNet, enlarged masks and conservative head fallbacks."""
+"""Face-sized redaction with YuNet and short motion-aware tracking."""
 from pathlib import Path
 import ctypes
 import hashlib
@@ -9,7 +9,7 @@ import urllib.request
 import cv2
 import numpy as np
 
-from transitbox.privacy_constants import MODEL_COMMIT, MODEL_NAME, MODEL_SHA256, MODEL_URL, VERSION
+from transitbox.privacy_constants import MODEL_COMMIT, MODEL_NAME, MODEL_SHA256, MODEL_URL, VERSION, FACE_PADDING, HOLD_SECONDS, MIN_SCORE, LARGE_BOX_SCORE
 
 
 def get_model(path):
@@ -48,7 +48,7 @@ def preload_cuda():
 
 class FaceDetector:
     """YuNet outputs decoded using the equations in OpenCV FaceDetectorYN."""
-    def __init__(self, model, device='cpu', threshold=.28, max_side=1280):
+    def __init__(self, model, device='cpu', threshold=MIN_SCORE, max_side=1280):
         import onnxruntime as ort
         self.threshold = threshold
         self.max_side = max_side
@@ -71,18 +71,18 @@ class FaceDetector:
             raise RuntimeError('CUDA face detection requested but unavailable')
         self.input_name = self.session.get_inputs()[0].name
 
-    def detect(self, image):
-        return self.detect_batch([image])[0]
+    def detect(self, image, max_scale=4., scene_guard=True):
+        return self.detect_batch([image],max_scale,scene_guard)[0]
 
-    def detect_batch(self, images):
+    def detect_batch(self, images, max_scale=4., scene_guard=True):
         if not images:
             return []
         if any(image.shape != images[0].shape for image in images):
-            return [self.detect(image) for image in images]
+            return [self.detect(image,max_scale,scene_guard) for image in images]
         batch = len(images)
         image = images[0]
         height, width = image.shape[:2]
-        scale = min(4., self.max_side/max(height, width))
+        scale = min(max_scale, self.max_side/max(height, width))
         w, h = max(32, round(width*scale)), max(32, round(height*scale))
         pad_w, pad_h = math.ceil(w/32)*32, math.ceil(h/32)*32
         blob = np.zeros((batch,3,pad_h,pad_w), dtype=np.float32)
@@ -90,9 +90,9 @@ class FaceDetector:
             blob[i,:,:h,:w] = cv2.resize(image, (w,h)).transpose(2,0,1)
         outputs = self.session.run(None, {self.input_name:blob})
         return [self._decode([output.reshape(batch,-1,output.shape[-1])[i] for output in outputs],
-                            width,height,w,h,pad_w) for i in range(batch)]
+                            width,height,w,h,pad_w,scene_guard) for i in range(batch)]
 
-    def _decode(self, outputs, width, height, w, h, pad_w):
+    def _decode(self, outputs, width, height, w, h, pad_w, scene_guard=True):
         boxes, scores = [], []
         for i, stride in enumerate((8,16,32)):
             score = np.sqrt(np.clip(outputs[i].reshape(-1),0,1)*np.clip(outputs[i+3].reshape(-1),0,1))
@@ -106,87 +106,80 @@ class FaceDetector:
             xy = centers-sizes/2
             decoded = np.column_stack((xy[:,0]*width/w, xy[:,1]*height/h,
                                        sizes[:,0]*width/w, sizes[:,1]*height/h))
-            boxes.extend(decoded.tolist())
-            scores.extend(score[indices].tolist())
+            for box,confidence in zip(decoded.tolist(),score[indices].tolist()):
+                if valid_face_box(box,confidence,width,height,scene_guard):
+                    boxes.append(box);scores.append(confidence)
         if not boxes:
             return []
         selected = np.asarray(cv2.dnn.NMSBoxes(boxes, scores, self.threshold, .3)).reshape(-1)
         return [tuple(boxes[i]) for i in selected]
 
 
-def expanded_box(box, width, height, padding=.40):
+def valid_face_box(box, score, width, height, scene_guard=True):
+    _x,_y,w,h = box
+    if not all(math.isfinite(value) for value in box) or w<3 or h<3 or not .30<=w/h<=1.8:
+        return False
+    # Low-confidence arm/device detections used to produce oversized boxes.
+    large = w*h>width*height*.04 or h>height*.25
+    return score >= (LARGE_BOX_SCORE if scene_guard and large else MIN_SCORE)
+
+
+def expanded_box(box, width, height, padding=FACE_PADDING):
     x,y,w,h = box
     return (max(0, math.floor(x-w*padding)), max(0, math.floor(y-h*padding)),
             min(width, math.ceil(x+w*(1+padding))), min(height, math.ceil(y+h*(1+padding))))
 
 
-def head_box(bounds, width, height):
-    x1,y1,x2,y2 = bounds
-    w,h = (x2-x1)*width,(y2-y1)*height
-    # Wider than the head and extending into the upper torso for occluded/tiny faces.
-    return (max(0, math.floor(x1*width-w*.12)), max(0, math.floor(y1*height-h*.04)),
-            min(width, math.ceil(x2*width+w*.12)), min(height, math.ceil(y1*height+h*.42)))
-
-
 class TemporalFaces:
-    """Hold missed detections briefly without leaving trails behind detected faces."""
-    def __init__(self, hold_seconds=1.):
+    """Predict briefly missing face positions; never replace faces with body boxes."""
+    def __init__(self, hold_seconds=HOLD_SECONDS):
         self.hold_seconds = hold_seconds
         self.tracks = []
 
     def update(self, timestamp, boxes):
-        old = [(seen,box) for seen,box in self.tracks if timestamp-seen<=self.hold_seconds]
+        old = [track for track in self.tracks if timestamp-track['seen']<=self.hold_seconds]
         matched = set()
         current = []
         for box in boxes:
             x,y,w,h = box
             candidates = []
-            for i,(_seen,previous) in enumerate(old):
+            for i,track in enumerate(old):
                 if i in matched:
                     continue
-                px,py,pw,ph = previous
+                px,py,pw,ph = self.predict(track,timestamp)
                 distance = math.hypot(x+w/2-px-pw/2,y+h/2-py-ph/2)
-                if distance<=max(w,h,pw,ph):
+                if .5<=w/pw<=2 and .5<=h/ph<=2 and distance<=max(w,h,pw,ph):
                     candidates.append((distance,i))
+            velocity=(0.,0.)
             if candidates:
-                matched.add(min(candidates)[1])
-            current.append((timestamp,box))
+                i=min(candidates)[1];matched.add(i)
+                previous=old[i];px,py,pw,ph=previous['box'];dt=timestamp-previous['seen']
+                if dt>0:
+                    limit=max(w,h)*4
+                    velocity=(float(np.clip((x-px)/dt,-limit,limit)),float(np.clip((y-py)/dt,-limit,limit)))
+            current.append({'seen':timestamp,'box':box,'velocity':velocity})
         current.extend(item for i,item in enumerate(old) if i not in matched)
         self.tracks = current
-        return [box for _,box in current]
+        return [self.predict(track,timestamp) for track in current]
 
+    @staticmethod
+    def predict(track,timestamp):
+        x,y,w,h=track['box'];vx,vy=track['velocity'];dt=max(0,timestamp-track['seen'])
+        return (x+vx*dt,y+vy*dt,w,h)
 
-def uncovered_heads(face_boxes, head_boxes):
-    result = []
-    for x1,y1,x2,y2 in head_boxes:
-        width,height = x2-x1,y2-y1
-        covered = any(x>=x1 and y>=y1 and x+w<=x2 and y+h<=y2 and
-                      abs(x+w/2-(x1+x2)/2)<=width*.25 and
-                      y+h/2-y1<=height*.65 for x,y,w,h in face_boxes)
-        if not covered:
-            result.append((x1,y1,x2,y2))
-    return result
-
-
-def redact(image, face_boxes, head_boxes=()):
+def redact(image, face_boxes):
     """Destroy facial detail inside the full mask; leave surrounding pixels intact."""
     height,width = image.shape[:2]
     mask = np.zeros((height,width), np.uint8)
-    regions = [expanded_box(box,width,height,padding=.15 if box[2]*box[3]>width*height*.04 else .40)
-               for box in face_boxes]+list(head_boxes)
+    regions = [expanded_box(box,width,height) for box in face_boxes]
+    result = image.copy()
     for x1,y1,x2,y2 in regions:
         x1,y1,x2,y2 = max(0,x1),max(0,y1),min(width,x2),min(height,y2)
         if x2>x1 and y2>y1:
             mask[y1:y2,x1:x2] = 255
-    result = image.copy()
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
-    for i in range(1,count):
-        x,y,w,h,area = stats[i]
-        roi = image[y:y+h,x:x+w]
-        # Four color cells per dimension, followed by strong smoothing.
-        tiny = cv2.resize(roi, (min(4,w),min(4,h)), interpolation=cv2.INTER_AREA)
-        tiny = cv2.GaussianBlur(tiny, (3,3), sigmaX=1.)
-        blurred = cv2.resize(tiny, (w,h), interpolation=cv2.INTER_LINEAR)
-        selected = labels[y:y+h,x:x+w] == i
-        result[y:y+h,x:x+w][selected] = blurred[selected]
+            w,h=x2-x1,y2-y1
+            roi=image[y1:y2,x1:x2]
+            tiny=cv2.resize(roi,(min(4,w),min(4,h)),interpolation=cv2.INTER_AREA)
+            tiny=cv2.GaussianBlur(tiny,(3,3),sigmaX=1.)
+            result[y1:y2,x1:x2]=cv2.resize(tiny,(w,h),interpolation=cv2.INTER_LINEAR)
     return result, int(np.count_nonzero(mask))

@@ -9,7 +9,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from transitbox.privacy_constants import MODEL_SHA256, VERSION
+from transitbox.privacy_constants import MODEL_SHA256, VERSION, FACE_PADDING, HOLD_SECONDS
 
 MEDIA_SUFFIXES = {'.mp4','.m4s','.m3u8','.jpg','.jpeg','.png','.webp'}
 
@@ -24,6 +24,10 @@ def check(root):
         raise ValueError('Face-redaction report is incomplete or uses an unexpected detector')
     if not report.get('per_frame_detection'):
         raise ValueError('Video redaction must detect faces on every frame')
+    if report.get('body_fallback') is not False or report.get('portrait_blanket_mask') is not False:
+        raise ValueError('Face-only publication must not use blanket body/portrait masks')
+    if report.get('face_padding')!=FACE_PADDING or report.get('temporal_hold_seconds')!=HOLD_SECONDS:
+        raise ValueError('Face mask/tracking parameters do not match the approved policy')
     html = (root/'index.html').read_text()
     match = re.search(r'<script id="transitbox-data"[^>]*>(.*?)</script>',html,re.S)
     data = json.loads(match[1])
